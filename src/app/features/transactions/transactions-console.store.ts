@@ -1,10 +1,24 @@
-import { Injectable, computed, signal } from '@angular/core';
+import {computed, inject, Injectable, signal} from '@angular/core';
 import {
   DateSortOrder,
   TransactionDetails,
   TransactionFilterStatus,
+  TransactionsQuery,
   TransactionSummary
 } from '../../core/transactions/transactions.model';
+import {
+  BehaviorSubject,
+  catchError,
+  combineLatest,
+  EMPTY,
+  filter,
+  map,
+  shareReplay,
+  switchMap,
+  tap
+} from 'rxjs';
+import {TransactionsApi} from '../../core/transactions/transactions.api';
+import {toObservable} from '@angular/core/rxjs-interop';
 
 interface AsyncState<T> {
   data: T;
@@ -12,8 +26,12 @@ interface AsyncState<T> {
   error: string | null;
 }
 
-@Injectable({ providedIn: 'root' })
+@Injectable({providedIn: 'root'})
 export class TransactionsConsoleStore {
+  private readonly transactionsApi = inject(TransactionsApi)
+  private readonly retryTransactionsSubject = new BehaviorSubject<void>(undefined);
+  private readonly retryDetailsSubject = new BehaviorSubject<void>(undefined);
+
   readonly statusFilter = signal<TransactionFilterStatus>('all');
   readonly searchTerm = signal('');
   readonly sortOrder = signal<DateSortOrder>('newest');
@@ -43,6 +61,69 @@ export class TransactionsConsoleStore {
     // 3) Cancel in-flight list requests when state changes.
     // 4) Build independent details request pipeline with its own loading/error/retry.
     // 5) Cancel in-flight details request on selection change.
+    this.getTransactions().subscribe()
+
+    this.getDetails().subscribe()
+  }
+
+  getTransactions() {
+    return this.retryTransactionsSubject.pipe(
+      map(() => {
+        this.listState.set({data: [], loading: true, error: null})
+        const query: TransactionsQuery = {
+          status: this.statusFilter(),
+          search: this.searchTerm(),
+          sort: this.sortOrder()
+        }
+
+        return query
+      }),
+      switchMap((queryParams) =>
+        this.transactionsApi.getTransactions(queryParams)
+          .pipe(
+            shareReplay(1),
+            tap(() => console.log('transactions request')),
+            tap(resp => this.listState.set({
+              data: resp,
+              loading: false,
+              error: null
+            })),
+            catchError(err => {
+              console.error(err)
+              this.listState.set({data: [], loading: false, error: err.message});
+              return EMPTY;
+            })
+          )
+      )
+    )
+  }
+
+  getDetails() {
+    return combineLatest([
+      toObservable(this.selectedTransactionId),
+      this.retryDetailsSubject
+    ]).pipe(
+      map(([id]) => id),
+      filter(id => id !== null),
+      tap(() => this.detailsState.set({data: null, loading: true, error: null})),
+      switchMap((filteredId) =>
+        this.transactionsApi.getTransactionDetails(filteredId)
+          .pipe(
+            shareReplay(1),
+            tap(() => console.log('details request')),
+            tap(resp => this.detailsState.set({
+              data: resp,
+              loading: false,
+              error: null
+            })),
+            catchError(err => {
+              console.error(err)
+              this.detailsState.set({data: null, loading: false, error: err.message});
+              return EMPTY;
+            })
+          )
+      )
+    )
   }
 
   setStatusFilter(status: TransactionFilterStatus): void {
@@ -59,19 +140,20 @@ export class TransactionsConsoleStore {
 
   selectTransaction(id: string): void {
     this.selectedTransactionId.set(id);
-    this.detailsState.set({ data: null, loading: false, error: null });
+    this.detailsState.set({data: null, loading: false, error: null});
+    this.retryDetailsSubject.next();
   }
 
   clearSelection(): void {
     this.selectedTransactionId.set(null);
-    this.detailsState.set({ data: null, loading: false, error: null });
+    this.detailsState.set({data: null, loading: false, error: null});
   }
 
   retryList(): void {
-    // TODO(interview): trigger list retry.
+    this.retryTransactionsSubject.next();
   }
 
   retryDetails(): void {
-    // TODO(interview): trigger details retry for currently selected row.
+    this.retryDetailsSubject.next();
   }
 }
